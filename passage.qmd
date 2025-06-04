@@ -1,0 +1,345 @@
+---
+title: "Third Homework: Bill Passage"
+subtitle: "Seminar The Swiss Parliament in Comparison"
+author: 
+  - "Lucas Moser"
+lang: en
+date: today
+date-format: "D. MMMM YYYY"
+format: 
+  html:
+      toc-title: Table of contents
+      toc: true
+      toc-depth: 2
+      number-sections: true
+      highlight-style: github
+      toc-location: body
+      cap-location: top
+      page-layout: full
+      embed-resources: true
+      self-contained-math: true
+      toc-expand: true
+      include-in-header:
+        text: "<link href='https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@400;700&display=swap rel='stylesheet''> <style> body {font-family: 'Source Sans Pro', sans-serif; text-align: justify} </style>"
+editor: visual
+bibliography: bibliography.bib
+execute:
+  echo: false
+  warning: false
+knitr:
+  opts_chunk:
+    message: false
+    fig.align: center
+include-in-header:
+  text: |
+   \usepackage{authblk}
+---
+
+```{r}
+library(tidyverse)
+library(gridExtra)
+library(tidytext)
+library(huxtable)
+party_colors <- c("SP" = "#F0554D", 
+                  "EDU" = "#A65E42", 
+                  "CVP" = "#D6862B", 
+                  "Mitte" = "#B56100",
+                  "EVP" = "#DEAA28", 
+                  "BDP" = "#E6C820", 
+                  "glp" = "#CAC43D", "GLP" = "#CAC43D", 
+                  "GPS" = "#84B547", "Grüne" = "#84B547",
+                  "SVP" = "#4B8A3E", 
+                  "csp-ow" = "#35AEB2", 
+                  "FDP-Liberale" = "#3872B5", 
+                  "LDP" = "#618DEA", 
+                  "Lega" = "#9070D4", 
+                  "other" = 'grey')
+dtm <- read.table("members_data_48.51.csv", sep = ";")
+dtm$duplicated <- duplicated(paste(dtm$member.uid, dtm$lp, dtm$chamber))
+dtm <- dtm %>% filter(!duplicated)
+dtm$years.of.service <- as.Date(dtm$date.leaving) - as.Date(dtm$date.first.joined.chamber)
+dtm$years.of.service <- lubridate::time_length(difftime(as.Date(dtm$date.leaving), as.Date(dtm$date.first.joined.chamber)), "years")
+dtb <- readRDS("bills_data_48-51_withStatus.RDS")
+dtb.sponsor <- dtb %>% filter(bill.sponsorID != "") %>% group_by(bill.lp, bill.sponsorID) %>% summarize(n = n())
+dtm$nr_bills <- dtb.sponsor$n[match(paste(dtm$member.uid, dtm$lp), paste(dtb.sponsor$bill.sponsorID, dtb.sponsor$bill.lp))]
+dtb$bill.passed <- NA
+dtb$bill.passed[dtb$bill.resolution.category == 'Acceptance'] <- 1
+dtb$bill.passed[dtb$bill.resolution.category %in% c('Rejection', 'Written Off', "Withdrawn")] <- 0
+dtpass <- dtb %>% filter(!is.na(bill.passed))
+dtpass <- dtpass %>% filter(bill.sponsorID != "")
+dtpass$sponsor.party <- dtm$party.short[match(dtpass$bill.sponsorID, dtm$member.uid)]
+dtpass$sponsor.party_tomajor[dtpass$bill.sponsorID != ''] <- 'other'
+dtpass$sponsor.party_tomajor[dtpass$sponsor.party == 'SVP'] <- 'SVP'
+dtpass$sponsor.party_tomajor[dtpass$sponsor.party == 'FDP-Liberale'] <- 'FDP-Liberale'
+dtpass$sponsor.party_tomajor[dtpass$sponsor.party == 'GLP'] <- 'GLP'
+dtpass$sponsor.party_tomajor[dtpass$sponsor.party %in% c('Mitte', 'CVP', 'BDP')] <- 'Mitte'
+dtpass$sponsor.party_tomajor[dtpass$sponsor.party == 'SP'] <- 'SP'
+dtpass$sponsor.party_tomajor[dtpass$sponsor.party == 'Grüne'] <- 'Grüne'
+dtpass$sponsor.gender <- dtm$gender[match(dtpass$bill.sponsorID, dtm$member.uid)]
+dtpass$bill.lp = as.character(dtpass$bill.lp)
+```
+
+# Task 1
+
+```{r}
+#Wordcount of bill text
+dtpass$wordcount = nchar(dtpass$bill.text)
+
+#Seniority at bill submission
+dtpass$sponsor.joined <- dtm$date.first.joined.chamber[match(dtpass$bill.sponsorID, dtm$member.uid)]
+dtpass$sponsor.seniority = lubridate::time_length(difftime(as.Date(dtpass$bill.submissiondate), as.Date(dtpass$sponsor.joined)), "years")
+
+#Experience (number of bills at submission)
+dtpass$experience = NA
+for (i in 1:nrow(dtpass)) {
+  dtpass$experience[i] = length(which(dtpass$bill.sponsorID == dtpass$bill.sponsorID[i] & 
+                                        dtpass$bill.submissiondate < dtpass$bill.submissiondate[i]))
+}
+```
+
+```{r}
+#Regression
+fit1 <- glm(bill.passed ~ bill.type + sponsor.gender + sponsor.party_tomajor + bill.lp + 
+              bill.chamber + bill.policydomain + wordcount + sponsor.seniority + experience,
+            data = dtpass, 
+            family = 'binomial')
+
+title1 = c("Table 1: Effect of MP and bill characteristics on passage (baselines: motion, FDP, 48th legislature, national council, domain transportation)")
+
+table1 = huxreg(fit1, bold_signif = 0.05, number_format = "%.3f", error_pos = "same",
+                statistics = c(N = "nobs", "logLik", "AIC")) %>%
+  insert_row(title1, fill = "", colspan = 2) %>%
+  set_bottom_border(row = 1, col = c(1:2))
+
+table1[c(4:39),1] = c("Parliamentary Initiative","Postulate","Male","GLP","Grüne","Mitte",
+                      "Other Party","SP","SVP","49th Legislature","50th Legislature",
+                      "51th Legislature","Ständerat",sort(unique(dtpass$bill.policydomain))[-1],
+                      "Text Length","Seniority","Prior Bills")
+
+width(table1) = 0.4
+table1
+```
+
+The regression results in Table 1 show that all variables except for the sponsor's gender and seniority have a significant impact on bill passage.
+
+```{r}
+#Gender
+conditions1 = c(bill.type = "Motion", bill.chamber = "Nationalrat", sponsor.seniority = 5,
+               experience = 12, bill.lp = 48, bill.policydomain ="Health", wordcount = 2000)
+ggfit1.gender <- ggeffects::ggpredict(fit1, terms = c("sponsor.party_tomajor",'sponsor.gender'), 
+                 condition = conditions1)
+ggplot(ggfit1.gender, aes(x = x, y = predicted, color = group))+
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), alpha = 1) + 
+  scale_y_continuous(labels = scales::percent) +
+  xlab("Party") + ylab("Probability of bill passage") +
+  labs(color = "Gender", title = "Figure 1: Predicted values for bill passage",
+       subtitle = "Adjusted for motions on health with 2000 words sponsored by 48th legislature national\ncouncil MPs with 5 years of service and 12 prior sponsored bills")
+
+```
+
+Figure 1 shows predicted probabilities of bill passage for male and female MPs for each party. Male and female MPs' bills are equally likely to pass.
+
+```{r}
+#Wordcount
+conditions2 = c(bill.type = "Motion", bill.chamber = "Nationalrat", sponsor.seniority = 5,
+               experience = 12, bill.lp = 48, bill.policydomain ="Health", sponsor.gender = "m",
+               sponsor.party_tomajor = "Mitte")
+ggfit1.wc <- ggeffects::ggpredict(fit1, terms = c('wordcount'), 
+                 condition = conditions2)
+ggplot(ggfit1.wc, aes(x = x, y = predicted))+
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), alpha = 1) + 
+  scale_y_continuous(labels = scales::percent) +
+  xlab("Bill word count") + ylab("Probability of bill passage") +
+  labs(title = "Figure 2: Predicted values for bill passage",
+       subtitle = "Adjusted for motions on health sponsored by male 48th legislature Mitte national\ncouncil MPs with 5 years of service and 12 prior sponsored bills")
+```
+
+Figure 2 shows that longer bills are more likely to pass, with substantive differences. This might be explained by longer bills containing more compromises and/or concessions to other parties or them having been drafted together with a higher number of MPs (of other parties).
+
+```{r}
+#Domain
+conditions3 = c(bill.type = "Motion", bill.chamber = "Nationalrat", sponsor.seniority = 5,
+               experience = 12, bill.lp = 48, wordcount = 2000, sponsor.gender = "m",
+               sponsor.party_tomajor = "Mitte")
+ggfit1.domain <- ggeffects::ggpredict(fit1, terms = c('bill.policydomain'), 
+                 condition = conditions2)
+ggfit1.domain <- ggfit1.domain[order(ggfit1.domain$predicted, decreasing = TRUE),]
+ggfit1.domain$x = factor(as.character(ggfit1.domain$x), levels = as.character(ggfit1.domain$x))
+ggplot(ggfit1.domain, aes(x = x, y = predicted))+
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), alpha = 1) + 
+  scale_y_continuous(labels = scales::percent) +
+  xlab("Policy Domain") + ylab("Probability of bill passage") +
+  labs(title = "Figure 3: Predicted values for bill passage",
+       subtitle = "Adjusted for 2000 word motions sponsored by male 48th legislature Mitte national\ncouncil MPs with 5 years of service and 12 prior sponsored bills") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+Figure 3 shows bills on criminal law, agriculture and civil rights have the highest odds of passing and bills on parliamentary procedure, the financial sector, labor and public finance have the lowest odds of passing.
+
+# Task 2
+
+## Task 2.1
+
+```{r}
+#Cosponsorship data
+el48 <- read.csv("edgelist_48LP.csv", row.names = 1, colClasses = c('character', 'character', 'character', 'character'))
+el49 <- readxl::read_xlsx("edgelist_49LP.xlsx")
+el50 <- readRDS("edgelist_50LP.rds")
+load("edgelist_51LP.RData")
+el = rbind(el48,el49,el50,el51)
+
+dtpass$nr_cos = NA
+dtpass$cosponsors = NA
+for (i in 1:nrow(dtpass)) {
+  dtpass$nr_cos[i] = length(which(el$bill.number == dtpass$bill.number[i]))
+  if (dtpass$bill.chamber[i] == "Ständerat") {
+    dtpass$cosponsors[i] = dtpass$nr_cos[i] / 45
+  } else {
+    dtpass$cosponsors[i] = dtpass$nr_cos[i] / 199
+  }
+}
+
+```
+
+```{r}
+#Regression
+fit2 <- glm(bill.passed ~ cosponsors,
+            data = dtpass, 
+            family = 'binomial')
+
+fit20 = glm(bill.passed ~ cosponsors + sponsor.party_tomajor,
+            data = dtpass, 
+            family = 'binomial')
+
+title2 = c("Table 2: Effect of share of cosponsorships of a bill on passage")
+
+table2 = huxreg(fit2, fit20, bold_signif = 0.05, number_format = "%.3f", error_pos = "same",
+                statistics = c(N = "nobs", "logLik", "AIC")) %>%
+  insert_row(title2, fill = "", colspan = 3) %>%
+  set_bottom_border(row = 1, col = c(1:3))
+
+table2[4:10,1] = c("Cosponsorships","GLP","Grüne","Mitte","Other Party","SP","SVP")
+width(table2) = 0.4
+table2
+```
+
+In order to compare the two chambers, the number of cosponsorships is divided by size of the chamber minus one (i.e. the number of MPs that could theoretically cosponsor the bill). The model in the first column of Table 2 shows that the share of cosponsorships of a bill has a significant positive effect on passage. The effect remains if the sponsor's party is added as a control variable. Figure 4 shows that the probability of passage increases by 10%-15% per extra 20% share of cosponsorship (i.e. 40 cosponsors for national council and 9 for council of states; using the first model without party control).
+
+```{r}
+ggfit2 <- ggeffects::ggpredict(fit2, terms = c('cosponsors'), 
+                 condition = conditions2)
+ggplot(ggfit2, aes(x = x, y = predicted))+
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), alpha = 1) + 
+  scale_y_continuous(labels = scales::percent) +
+  xlab("Share of the chamber that cosponsors the bill") + ylab("Probability of bill passage") +
+  labs(title = "Figure 4: Predicted values for bill passage")
+```
+
+## Task 2.2
+
+I will examine ideological, gender and regional diversity. I operationalize ideological diversity, which I expect to be the most important, as the number of major parties from which there is at least one cosponsorship. <br> For gender, I define a dummy variable for whether at least a fourth of cosponsors are women. 56% of bills meet this threshold. <br> For regional diversity, I define a dummy variable for whether at least a fourth of cosponsors are from a (majority) French or Italian speaking canton (GE, JU, NE, VD, FR, VS, TI). 51% of bills meet this threshold. <br> For reference, women make up 33% of the national council and 21% of the council of states across the four legislatures. French and Italian speaking cantons hold 60 seats (30%) in the national council (in 2024), and 14 seats (31%) in the council of states.
+
+```{r}
+#Cosponsor Diversity Variables (party, gender, region)
+dtm$party.short[dtm$party.short %in% c('CVP', 'BDP')] <- 'Mitte'
+dtm$party.short[!(dtm$party.short %in% c("Mitte","FDP-Liberale","SP","SVP","Grüne","GLP"))] <- 'other'
+
+
+el$cosponsor.parties = dtm$party.short[match(el$bill.cosponsorID,dtm$member.uid)]
+el$cosponsor.female = dtm$gender[match(el$bill.cosponsorID,dtm$member.uid)]
+el$cosponsor.female = ifelse(el$cosponsor.female == "f",1,0)
+el$cosponsor.region = dtm$canton.short[match(el$bill.cosponsorID,dtm$member.uid)]
+el$cosponsor.region = ifelse(el$cosponsor.region %in% c("GE","JU","NE","VD","FR","VS","TI"),1,0)
+
+elp = el %>% group_by(bill.number, cosponsor.parties) %>% 
+  summarise(count = n())
+elf = el %>% group_by(bill.number, cosponsor.female) %>% 
+  summarise(count = n()) %>% filter(cosponsor.female == 1)
+elr = el %>% group_by(bill.number, cosponsor.region) %>% 
+  summarise(count = n()) %>% filter(cosponsor.region == 1)
+
+elp = elp[which(elp$cosponsor.parties != "other"),]
+dtpass$cosponsor.parties = NA
+for (i in 1:nrow(dtpass)) {
+  dtpass$cosponsor.parties[i] = length(which(elp$bill.number == dtpass$bill.number[i]))
+}
+
+dtpass$cosponsor.female = floor(0.75 +
+                                  elf$count[match(dtpass$bill.number,elf$bill.number)] / dtpass$nr_cos)
+dtpass$cosponsor.female = ifelse(is.na(dtpass$cosponsor.female),0,dtpass$cosponsor.female)
+dtpass$cosponsor.region = floor(0.75 +
+                                  elr$count[match(dtpass$bill.number,elr$bill.number)] / dtpass$nr_cos)
+dtpass$cosponsor.region = ifelse(is.na(dtpass$cosponsor.region),0,dtpass$cosponsor.region)
+
+#Regression
+fit3 <- glm(bill.passed ~ cosponsor.parties + cosponsor.female + cosponsor.region
+            + sponsor.party_tomajor + cosponsors,
+            data = dtpass, 
+            family = 'binomial')
+
+title3 = c("Table 3: Effect of cosponsorship diversity on passage")
+
+table3 = huxreg(fit3, bold_signif = 0.05, number_format = "%.3f", error_pos = "same",
+                statistics = c(N = "nobs", "logLik", "AIC")) %>%
+  insert_row(title3, fill = "", colspan = 2) %>%
+  set_bottom_border(row = 1, col = c(1:2))
+
+table3[4:13,1] = c("Cosponsoring Parties","Cosponsoring Women","Cosponsoring \"Latin\" MPs",
+                   "GLP","Grüne","Mitte","Other Party","SP","SVP","Cosponsoring MPs")
+table3
+```
+
+Table 3 shows that ideological diversity among cosponsors significantly improves bill passage odds. This is to be expected, especially in the Swiss consociational system. Figure 5 shows predicted probabilities for this variable. <br> Surprisingly, on the other hand, bills with more female cosponsors and cosponsors of French and Italian speaking cantons (herefater referred to as Latin MPs) are significantly less likely to pass. The model includes the sponsor's party. Thus, the result cannot be explained by left wing parties having more female and Latin MPs who cosponsor each other a lot but fail to pass their own bills. The gender effect can also not be explained by women cosponsoring each other and failing to pass their own bills since Table 1 showed that bills sponsored by men and women have equal odds of passing. Additionally, if the bill's policy domain is included in this model, the significant negative effects of gender and regional diversity also remain.
+
+```{r}
+ggfit3 <- ggeffects::ggpredict(fit3, terms = c( "cosponsor.parties"), 
+                 condition = c("cosponsors" = 0.1, "sponsor.party_tomajor" = "Mitte",
+                               "cosponsor.female" = 1, "cosponsor.region" = 1))
+ggplot(ggfit3, aes(x = x, y = predicted)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), alpha = 1) + 
+  scale_y_continuous(labels = scales::percent) +
+  xlab("Number of major parties from which the bill has cosponsors") +
+  ylab("Probability of bill passage") +
+  labs(title = "Figure 5: Predicted values for bill passage", subtitle = "Adjusted for bills from Mitte MPs with 10% cosponsorship and more than 25% female\nand \"Latin\" MP cosponsors")
+```
+
+## Task 2.3
+
+```{r}
+#Cosponsorship Activity
+el$date = dtb$bill.submissiondate[base::match(as.character(el$bill.number),
+                                                 as.character(dtb$bill.number))]
+dtb$activity = NA
+for (i in 1:nrow(dtb)) {
+   dtb$activity[i] = length(which(as.Date(el$date) < as.Date(dtb$bill.submissiondate[i]) &
+                                 el$bill.cosponsorID == dtb$bill.sponsorID[i]))
+}
+dtpass$activity = dtb$activity[match(dtpass$bill.sponsorID, dtb$bill.sponsorID)]
+
+fit4 = glm(bill.passed ~ activity,
+            data = dtpass, 
+            family = 'binomial')
+
+fit5 = lm(data=dtpass, activity ~ sponsor.party_tomajor)
+fit6 = glm(bill.passed ~ activity + sponsor.party_tomajor,
+            data = dtpass, 
+            family = 'binomial')
+
+title4 = c("Table 4: Effect of (time dependent) cosponsorship activity and party on passage and of party on cosponsorship activity")
+
+table4 = huxreg(fit4,fit5,fit6, bold_signif = 0.05, number_format = "%.3f", error_pos = "same",
+                statistics = c(N = "nobs", "logLik", "AIC")) %>%
+  insert_row(title4, fill = "", colspan = 4) %>%
+  set_bottom_border(row = 1, col = 1:4)
+
+table4[4:10,1] = c("Cosponsorship Activity","GLP","Grüne","Mitte","Other Party","SP","SVP")
+table4[2,2:4] = c("Passage","Cosponsorship","Passage")
+table4
+```
+
+I run models with a time dependent cosponsorship activity variable (note that cosponsorships of bills introduced before the 48th legislature aren't considered but all cosponsorships of the 48th through 51th are considered, not only cosponsorships in the same legislature). The first column of Table 4 shows that increased cosponsorship activity by a bill's sponsor reduces the bill's odds of passage. This might be explained by the fact that MPs from SP, GLP and SVP are more active cosponsors (which can be seen in the model in the second column, which regresses party on cosponsorship activity) while their bills are less likely to pass compared to FDP and Mitte (which can be seen in the model in the third column). The third column also shows that if party controls are added to the first model, cosponsorship activity no longer has a significant effect on bill passage (*p* = 0.11).

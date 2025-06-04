@@ -1,0 +1,394 @@
+---
+title: "Second Homework: Cosponsorship"
+subtitle: "Seminar The Swiss Parliament in Comparison"
+author: 
+  - "Lucas Moser"
+lang: en
+date: today
+date-format: "D. MMMM YYYY"
+format: 
+  html:
+    self-contained: true
+    toc: true
+    toc-depth: 2
+    fig-align: center
+    cap-location: top
+    code-link: true
+    include-in-header:
+      text: "<link href='https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@400;700&display=swap rel='stylesheet''> <style> body {font-family: 'Source Sans Pro', sans-serif; text-align: justify} </style>"
+bibliography: bibliography.bib
+execute:
+  echo: false
+  warning: false
+knitr:
+  opts_chunk:
+    message: false
+include-in-header:
+  text: |
+   \usepackage{authblk}
+---
+
+# Task 1: Cosponsorship networks
+
+```{r,fig.height=15,fig.width=15}
+#Libraries and Party Colors
+
+library(tidyverse)
+library(gridExtra)
+library(tidytext)
+library(igraph)
+library(GGally)
+library(huxtable)
+library(ggrepel)
+library(ggeffects)
+library(mirt)
+
+party_colors <- c("SP" = "#F0554D", 
+                  "EDU" = "#A65E42", 
+                  "CVP" = "#D6862B", 
+                  "Mitte" = "#B56100",
+                  "EVP" = "#DEAA28", 
+                  "BDP" = "#E6C820", 
+                  "glp" = "#CAC43D", "GLP" = "#CAC43D", 
+                  "GPS" = "#84B547", "Grüne" = "#84B547",
+                  "SVP" = "#4B8A3E", 
+                  "csp-ow" = "#35AEB2", 
+                  "FDP-Liberale" = "#3872B5", 
+                  "LDP" = "#618DEA", 
+                  "Lega" = "#9070D4", 
+                  "Other" = 'grey')
+
+##### Load and clean up data
+## MP data
+dtm <- read.table("members_data_48.51.csv", sep = ";")
+
+## Clean up duplicates: (feel free to find a more elegant solution!)
+dtm$duplicated <- duplicated(paste(dtm$member.uid, dtm$lp, dtm$chamber))
+dtm <- dtm %>% filter(!duplicated)
+
+## For every MP at the end of their LP-service?
+dtm$years.of.service <- as.Date(dtm$date.leaving) - as.Date(dtm$date.first.joined.chamber)
+## transform it into years for easier handling
+dtm$years.of.service <- lubridate::time_length(difftime(as.Date(dtm$date.leaving), as.Date(dtm$date.first.joined.chamber)), "years")
+
+## party groupings:
+dtm$party.short_tomajor <- 'Other'
+dtm$party.short_tomajor[dtm$party.short == 'SVP'] <- 'SVP'
+dtm$party.short_tomajor[dtm$party.short == 'FDP-Liberale'] <- 'FDP-Liberale'
+dtm$party.short_tomajor[dtm$party.short == 'GLP'] <- 'GLP'
+dtm$party.short_tomajor[dtm$party.short %in% c('Mitte', 'CVP', 'BDP')] <- 'Mitte'
+dtm$party.short_tomajor[dtm$party.short == 'SP'] <- 'SP'
+dtm$party.short_tomajor[dtm$party.short == 'Grüne'] <- 'Grüne'
+
+## Bill data
+dtb <- readRDS("bills_data_48-51_withStatus.rds")
+
+## number of bills for dtm data
+dtb.sponsor <- dtb %>% filter(bill.sponsorID != "") %>% group_by(bill.lp, bill.sponsorID) %>% summarize(n = n())
+dtm$nr_bills <- dtb.sponsor$n[match(paste(dtm$member.uid, dtm$lp), paste(dtb.sponsor$bill.sponsorID, dtb.sponsor$bill.lp))]
+
+## Network data
+el48 <- read.csv("edgelist_48LP.csv", row.names = 1, colClasses = c('character', 'character', 'character', 'character'))
+el49 <- readxl::read_xlsx("edgelist_49LP.xlsx")
+el50 <- readRDS("edgelist_50LP.rds")
+load("edgelist_51LP.RData")
+
+
+##### 48th Legislature (for comaprison)
+## Let's create a subset for our 48th LP:
+dtm48 <- dtm %>% filter(lp == 48)
+
+## Let's create a weighted edgelist! 
+elw48 <- el48 %>% group_by(bill.sponsorID, bill.cosponsorID) %>% 
+  summarise(count = n())
+
+## We can also create Shares: 
+dtb48 <- dtb %>% filter(bill.lp == 48) %>% group_by(bill.sponsorID) %>% summarise(count = n())
+elw48$sponsor.nr.bills <- dtb48$count[match(elw48$bill.sponsorID, dtb48$bill.sponsorID)]
+
+## Let's calculate share of cosponsorship support: 
+elw48$cospons.share <- elw48$count/elw48$sponsor.nr.bills
+
+## 2) Adjacency matrix
+## let's subset our members-table first. It is the basis for all our networks.
+dtm48.nr <- dtm48 %>% filter(chamber == 'Nationalrat')
+
+##
+adj48.nr <- matrix(0, nrow = nrow(dtm48.nr), ncol = nrow(dtm48.nr))
+rownames(adj48.nr) <- dtm48.nr$member.uid
+colnames(adj48.nr) <- dtm48.nr$member.uid
+
+# now let's fill the adjacency matrix: 
+mps48.nr <- dtm48.nr$member.uid
+elw48.25 <- elw48 %>% filter(cospons.share >= 0.25) # here we filter ties that are bigger than 25%!
+for (i in 1:nrow(elw48.25)) {
+  row.index <- which(mps48.nr == elw48.25$bill.cosponsorID[i])
+  col.index <- which(mps48.nr == elw48.25$bill.sponsorID[i])
+  adj48.nr[row.index, col.index] <- 1
+}
+
+## Plot it
+ggnet2(adj48.nr, label = TRUE, arrow.size = 3, arrow.gap = .01, size = 6, 
+       node.color = factor(dtm48.nr$party.short_tomajor), 
+       palette = party_colors) +
+  labs(title = "Figure 1: Network Plot on 48th Legislature (National Council)")
+#Nicer Plot: Drop Isolates
+
+
+##### Same for 50th Legislature
+dtm50 <- dtm %>% filter(lp == 50)
+
+elw50 <- el50 %>% group_by(bill.sponsorID, bill.cosponsorID) %>% 
+  summarise(count = n())
+
+dtb50 <- dtb %>% filter(bill.lp == 50) %>% group_by(bill.sponsorID) %>% summarise(count = n())
+elw50$sponsor.nr.bills <- dtb50$count[match(elw50$bill.sponsorID, dtb50$bill.sponsorID)]
+
+elw50$cospons.share <- elw50$count/elw50$sponsor.nr.bills
+
+dtm50.nr <- dtm50 %>% filter(chamber == 'Nationalrat')
+
+adj50.nr <- matrix(0, nrow = nrow(dtm50.nr), ncol = nrow(dtm50.nr))
+rownames(adj50.nr) <- dtm50.nr$member.uid
+colnames(adj50.nr) <- dtm50.nr$member.uid
+
+mps50.nr <- dtm50.nr$member.uid
+elw50.33 <- elw50 %>% filter(cospons.share >= 0.33)
+for (i in 1:nrow(elw50.33)) {
+  row.index <- which(mps50.nr == elw50.33$bill.cosponsorID[i])
+  col.index <- which(mps50.nr == elw50.33$bill.sponsorID[i])
+  adj50.nr[row.index, col.index] <- 1
+}
+
+ggnet2(adj50.nr, label = TRUE, arrow.size = 3, arrow.gap = .01, size = 6, 
+       node.color = factor(dtm50.nr$party.short_tomajor), 
+       palette = party_colors) +
+  labs(title = "Figure 2: Network Plot on 50th Legislature (National Council)")
+```
+Figures 1 and 2 display the network graphs for the national council in the 48th (25% cosponsorship threshold) and 50th (33% cosponsorship threshold) legislature. Two marked differences between the two are that the second shows far fewer within-party connections for all major parties (except SP) and far fewer cross-party connections in the group Mitte-FDP-SVP. <br>
+The second graph suggests that SP has the most connections and Mitte the least (relative to the parties' numbers of MPs). In fact, Table 1 shows that SP MPs have the most connections and significantly more than FDP MPs, who have a similar amount of connections as Mitte and SVP, as can be seen in Figure 3. On average, SVP MPs have the fewest connections, though not significantly fewer than FDP.
+
+```{r}
+##### Centrality measures
+
+## First we have to create a graph object: 
+dtg50 <- igraph::graph.adjacency(adj50.nr, mode = "directed")
+
+## Starting with degree centrality: 
+dtm50.nr$overall_degree <- igraph::degree(dtg50)
+
+party_degrees = dtm50.nr %>% group_by(party.short_tomajor) %>% summarise(mp_count = n())
+
+dtm50.nr$party_size = NA
+for (i in 1:nrow(dtm50.nr)) {
+  dtm50.nr$party_size[i] = party_degrees$mp_count[which(party_degrees$party.short_tomajor == dtm50.nr$party.short_tomajor[i])]
+}
+
+fit1 = lm(data = dtm50.nr, overall_degree ~ party.short_tomajor)
+
+title1 = c("Table 1: Effect of party on MPs' degree count (baseline: FDP)")
+
+table1 = huxreg(fit1, bold_signif = 0.05, number_format = "%.2f", error_pos = "same")[-c(11,12),] %>%
+  set_top_border(col=c(1:2),row=nrow(huxreg(fit1,error_pos = "same")[-c(11,12),])) %>%
+  set_align(row = c(2:11), col = 2, "center") %>%
+  #set_font_size(12) %>%
+  insert_row(
+        title1,
+        fill = "",
+        colspan = 2
+      ) %>%
+  set_bottom_border(row = 1, col = c(1:2))
+
+table1[c(4:9),1] = c("GLP","Grüne","Mitte","Other","SP","SVP")
+
+table1
+
+ggfit1 <- ggpredict(fit1, terms = c('party.short_tomajor'))
+# and plot it:
+ggplot(ggfit1, aes(x = x, y = predicted, color = x))+
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), alpha = 1) +
+  xlab("Party") + ylab("Predicted degree count per MP") +
+  scale_color_manual("", values = party_colors) +
+  #theme(legend.position = 'bottom') + 
+  ggtitle("Figure 3: Predicted values for degree count per MP")
+```
+
+
+# Task 2: Cross-party cosponsorship
+
+```{r, fig.height=7,fig.width=10}
+#Classify within/cross-party in edgelist
+elw50$party_sponsor = NA
+elw50$party_cosponsor = NA
+elw50$same_party = NA
+for (i in 1:nrow(elw50)) {
+  elw50$party_sponsor[i] = dtm50$party.short_tomajor[which(elw50$bill.sponsorID[i] == dtm50$member.uid)]
+  elw50$party_cosponsor[i] = dtm50$party.short_tomajor[which(elw50$bill.cosponsorID[i] == dtm50$member.uid)]
+  elw50$same_party[i] = ifelse(elw50$party_sponsor[i] == elw50$party_cosponsor[i],1,0)
+}
+
+#Adjacancy matrices for within/cross
+adj50.nr.w <- matrix(0, nrow = nrow(dtm50.nr), ncol = nrow(dtm50.nr))
+rownames(adj50.nr.w) <- dtm50.nr$member.uid
+colnames(adj50.nr.w) <- dtm50.nr$member.uid
+mps50.nr.w <- dtm50.nr$member.uid
+elw50.w <- elw50 %>% filter(same_party == 1)
+for (i in 1:nrow(elw50.w)) {
+  row.index <- which(mps50.nr == elw50.w$bill.cosponsorID[i])
+  col.index <- which(mps50.nr == elw50.w$bill.sponsorID[i])
+  adj50.nr.w[row.index, col.index] <- 1
+}
+
+adj50.nr.c <- matrix(0, nrow = nrow(dtm50.nr), ncol = nrow(dtm50.nr))
+rownames(adj50.nr.c) <- dtm50.nr$member.uid
+colnames(adj50.nr.c) <- dtm50.nr$member.uid
+mps50.nr.c <- dtm50.nr$member.uid
+elw50.c <- elw50 %>% filter(same_party == 0)
+for (i in 1:nrow(elw50.c)) {
+  row.index <- which(mps50.nr == elw50.c$bill.cosponsorID[i])
+  col.index <- which(mps50.nr == elw50.c$bill.sponsorID[i])
+  adj50.nr.c[row.index, col.index] <- 1
+}
+
+#Centrality measure within/across
+dtg50.w <- igraph::graph.adjacency(adj50.nr.w, mode = "directed")
+dtg50.c <- igraph::graph.adjacency(adj50.nr.c, mode = "directed")
+
+dtm50.nr$degree.w <- igraph::degree(dtg50.w)
+dtm50.nr$degree.c <- igraph::degree(dtg50.c)
+dtm50.nr$indegree.w <- igraph::degree(dtg50.w, mode = 'in')
+dtm50.nr$indegree.c <- igraph::degree(dtg50.c, mode = 'in')
+dtm50.nr$outdegree.w <- igraph::degree(dtg50.w, mode = 'out')
+dtm50.nr$outdegree.c <- igraph::degree(dtg50.c, mode = 'out')
+
+party_degrees = dtm50.nr %>% group_by(party.short_tomajor) %>%
+  summarise(mp_count = n(),
+            degree.w = sum(degree.w),
+            degree.c = sum(degree.c),
+            indegree.w = sum(indegree.w),
+            indegree.c = sum(indegree.c),
+            outdegree.w = sum(outdegree.w),
+            outdegree.c = sum(outdegree.c))
+
+#Within/Cross support measure
+
+# Within Support: Number of within-cosponsorships, divided by number of sponsored bills and party size -1
+dtm50.nr$support.w = dtm50.nr$indegree.w / dtm50.nr$nr_bills / (dtm50.nr$party_size - 1)
+
+#Cross Support: Number of cross-cosponsorships, divided by number of sponsored bills and Nr. of other MPs
+dtm50.nr$support.c = dtm50.nr$indegree.c / dtm50.nr$nr_bills / (nrow(dtm50.nr) - dtm50.nr$party_size)
+
+dtm50.nr$best = rep("")
+dtm50.nr$best[which(dtm50.nr$support.c == max(dtm50.nr$support.c,na.rm=TRUE))] = 
+  as.character(dtm50.nr$lastname[which(dtm50.nr$support.c == max(dtm50.nr$support.c,na.rm=TRUE))])
+
+#Plot
+ggplot(dtm50.nr, aes(x = support.w, 
+                     y = support.c,
+                     label = best,
+                     color = party.short_tomajor)) +
+  labs(title="Figure 4: MPs' within and cross-party support",color="") +
+  xlab("Received within-party cosponsorships per sponsored bill and number of within-party MPs") +
+  ylab("Received cross-party cosponsorships per sponsored bill and number of cross-party MPs") +  
+  geom_point() +
+  scale_color_manual(values = party_colors) +
+  geom_text_repel() +
+  theme(axis.title.x = element_text(vjust=-1.2),axis.title.y = element_text(vjust=+3))
+
+```
+I define an MP's within-party support as the number of cosponsorships they have recieved of MP's of their party, divided by the number of bills they have introduced and by the number of MPs in their party. <br>
+I define an MP's cross-party support as the number of cosponsorships they have recieved of MP's of other parties, divided by the number of bills they have introduced and by the number of MPs in other parties. <br>
+For this, all eleven MPs of minor parties are lumped together and I will not interpret their results. <br>
+Figure 4 shows all MPs' within and cross-party support. There is a large cluster with small values on both axes and a handful of outliers with relatively high within and/or cross-party support. Christa Markwalder (FDP), former president of the national council, has the highest cross-party support (and also the third highest within-party support). Her 6 bills received 95 cosponsorships by MPs of other parties. This high value is mainly driven by one of her bills (on individual taxation of married couples) receiving 103 overall cosponsorships, more than half the national council. <br>
+Figures 5 and 6 below show the predicted values of within and cross-party support for each party. All major parties have similar levels of within-party support, while there is a clearer order for cross-party support: FDP, followed by Mitte, followed by SVP, GLP and SP, followed by Grüne. In fact, FDP's support is significantly higher than that of SVP, SP and Grüne (all *p*-values around 0.02).
+
+
+```{r}
+fit2 = lm(data = dtm50.nr, support.w ~ party.short_tomajor)
+ggfit2 <- ggpredict(fit2, terms = c('party.short_tomajor'))
+# and plot it:
+ggplot(ggfit2, aes(x = x, y = predicted, color = x))+
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), alpha = 1) +
+  xlab("Party") + ylab("Predicted within-party support") +
+  scale_color_manual("", values = party_colors) +
+  #theme(legend.position = 'bottom') + 
+  ggtitle("Figure 5: Predicted values for within-party support")
+
+fit3 = lm(data = dtm50.nr, support.c ~ party.short_tomajor)
+ggfit3 <- ggpredict(fit3, terms = c('party.short_tomajor'))
+# and plot it:
+ggplot(ggfit3, aes(x = x, y = predicted, color = x))+
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), alpha = 1) +
+  xlab("Party") + ylab("Predicted cross-party support") +
+  scale_color_manual("", values = party_colors) +
+  #theme(legend.position = 'bottom') + 
+  ggtitle("Figure 6: Predicted values for cross-party support")
+
+```
+
+
+# Task 3: IRT on cosponsorship data
+
+```{r}
+################### I provide you with code for task 3: 
+## Let's add chamber so we can filter for Nationalrat-bills. Makes it a bit easier for the IRT.
+el48$chamber <- dtb$bill.chamber[match(el48$bill.number, dtb$bill.number)]
+
+## create a different edgelist:  we want MPs and bills => to mirror the MPs and Votes data
+el48.long <- el48 %>% filter(chamber == 'Nationalrat') %>% 
+  # Gather sponsors and cosponsors into a single column
+  pivot_longer(cols = c(bill.sponsorID, bill.cosponsorID), 
+               names_to = "sponsor_type", 
+               values_to = "mpID") 
+
+## we need to remove duplicates
+el48.long <- el48.long %>%
+  group_by(mpID, bill.number) %>%
+  mutate(count = 1) %>% 
+  summarize(count2 = sum(count), .groups = "drop")
+
+## and add a count variable (for the IRT-transformation)
+el48.long$count <- 1
+
+############# From here: the code should be familiar!!! Fill in the necessary code (XXXXXXXXXXXXXXXXXXXXXXX) yourself
+## pivot to long: (I keep the name dtv, even though v stands for votes. Feel free to change it.)
+dtv <- el48.long %>%
+  pivot_wider(
+    id_cols = mpID, 
+    names_from = bill.number,  
+    values_from = count , 
+    values_fill = 0 
+  )
+
+## save members
+dtv.members <- data.frame(dtv[,1])
+dtv <- dtv[,-1]
+
+## run IRT
+set.seed(42)
+fit4 <- mirt(data = dtv[,1:1000], 
+             model = 1,
+             itemtype = "2PL",
+             verbose = FALSE)
+
+## extract scores
+dtv.members$score.model1 <- fscores(fit4) %>% as.numeric()
+dtm48$cospons.IRTscore <- dtv.members$score.model1[match(dtm48$member.uid, dtv.members$mpID)]
+
+## a cooler plot is this: 
+dtm48 %>%
+  mutate(cospons.IRTscore_round = round(cospons.IRTscore, 1)) %>%
+  group_by(cospons.IRTscore_round, party.short_tomajor) %>%
+  mutate(id = row_number()) %>% 
+  ggplot(aes(x = -cospons.IRTscore_round, y = id, fill = party.short_tomajor)) +
+  geom_tile(color = "white", width = 0.1, height = 1) +  # Kacheln mit Zwischenlinien
+  scale_fill_manual("", values = party_colors) +
+  theme_minimal() +
+  labs(x = "IRT Dimension 1", y = "", title = "Figure 7: One-dimensional IRT on MP cosponsorship")
+
+```
+The IRT places all MPs on a scale based on which bills they did and didn't cosponsor. Figures 7 shows the MPs' cosponsorship scores. A striking finding is that the biggest distance is between Mitte and SP/Grüne, with SVP/FDP lying in between (but much closer to Mitte). The network plot in Figure 1 suggests that the least cosponsorship is between SVP and SP/Grüne. I interpret the IRT's placement of Mitte/SVP/FDP as follows: Since the parties' degree of within-party cosponsorship is more similar than their cross-party cosponsorship (see Figures 5 and 6), the difference in the IRT should be driven more strongly by differences in cross-party cosponsorship. Mitte often cosponsors FDP and SVP, who's bills are more right-wing than its own. Mitte's less right-wing bills in turn get cosponsored by FDP and SVP, which is why the IRT places them closer to the center. <br>
+The one-dimensionality lumps within and cross-party cosponsorship together, a second dimension would probably help to untangle the two.

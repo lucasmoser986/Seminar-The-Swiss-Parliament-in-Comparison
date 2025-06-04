@@ -1,0 +1,566 @@
+---
+title: "First Homework: IRT"
+subtitle: "Seminar The Swiss Parliament in Comparison"
+author: 
+  - "Lucas Moser"
+lang: en
+date: today
+date-format: "D. MMMM YYYY"
+format: 
+  html:
+    self-contained: true
+    toc: true
+    toc-depth: 2
+    fig-align: center
+    cap-location: top
+    code-link: true
+    include-in-header:
+      text: "<link href='https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@400;700&display=swap rel='stylesheet''> <style> body {font-family: 'Source Sans Pro', sans-serif; text-align: justify} </style>"
+bibliography: bibliography.bib
+execute:
+  echo: false
+  warning: false
+knitr:
+  opts_chunk:
+    message: false
+include-in-header:
+  text: |
+   \usepackage{authblk}
+---
+
+```{r, fig.width=8, fig.height=5.66}
+#load and clean up data (data session, headers 0 through 3)
+library(tidyverse)
+library(mirt)          
+library(ggmirt)
+library(texreg)        
+library(ggeffects)
+library(ggrepel)
+library(factoextra)
+library(ggforce)
+library(concaveman)
+library(huxtable)
+party_colors <- c("SP" = "#F0554D", 
+                  "EDU" = "#A65E42", 
+                  "CVP" = "#D6862B", 
+                  "Mitte" = "#B56100",
+                  "EVP" = "#DEAA28", 
+                  "BDP" = "#E6C820", 
+                  "glp" = "#CAC43D", "GLP" = "#CAC43D", 
+                  "GPS" = "#84B547", "Grüne" = "#84B547",
+                  "SVP" = "#4B8A3E", 
+                  "csp-ow" = "#35AEB2", 
+                  "FDP" = "#3872B5", 
+                  "LDP" = "#618DEA", 
+                  "Lega" = "#9070D4", 
+                  "other" = 'grey')
+dtm <- read.table("members_data_48.51.csv", sep = ";")
+load("voting51LP.RData")
+dtv <- dtv.long %>%
+  pivot_wider(
+    id_cols = mp.uid,            
+    names_from = voteRegistrationNumber,  
+    values_from = vote.result             
+  )
+mps.51 <- dtm$member.uid[dtm$lp == 51 & dtm$chamber == 'Nationalrat'] 
+dtv <- dtv %>% filter(mp.uid %in% mps.51)
+dtv <- dtv[rowSums(is.na(dtv)) <= 4000,]
+dtv.members <- data.frame(dtv[,1])
+dtv <- dtv[,-1]
+dtv <- dtv %>%
+  mutate_all(~ case_when(
+    . == "Ja" ~ 1,
+    . == "Nein" ~ 0,
+    . == "Der Präsident stimmt nicht" ~ NA,
+    . == 'Die Präsidentin/der Präsident stimmt nicht' ~ NA,
+    . == "Entschuldigt" ~ NA,
+    . == "Entschuldigt gem. Art. 57 Abs. 4" ~ NA,
+    . == "Enthaltung" ~ NA,
+    . == "Hat nicht teilgenommen" ~ NA,
+    TRUE ~ NA_real_  # Keep everything else as NA, or modify as needed
+  ))
+dtv <- dtv %>%
+  select_if(~ n_distinct(., na.rm = TRUE) > 1)
+dtv.members$lastname <- dtm$lastname[match(dtv.members$mp.uid, dtm$member.uid)]
+dtv.members$years.of.service <- dtm$years.of.service[match(dtv.members$mp.uid, dtm$member.uid)]
+dtv.members$gender <- dtm$gender[match(dtv.members$mp.uid, dtm$member.uid)]
+dtv.members$age <- dtm$age[match(dtv.members$mp.uid, dtm$member.uid)]
+dtv.members$canton <- dtm$canton.short[match(dtv.members$mp.uid, dtm$member.uid)]
+dtv.members$party <- dtm$party.short[match(dtv.members$mp.uid, dtm$member.uid)]
+dtv.members$party.parlgroup <- recode(dtv.members$party, 
+                                 'Sol' = 'Grüne', 
+                                 'PdA' = 'Grüne', 
+                                 'Lega' = 'SVP', 
+                                 'LDP' = 'FDP',
+                                 'FDP-Liberale' = 'FDP',
+                                 'EVP' = 'Mitte', 
+                                 'EDU' = 'SVP', 
+                                 'BDP' = 'Mitte', 
+                                 'CVP' = 'Mitte', 
+                                 'AL' = 'Grüne')
+dtcantons <- data.frame(canton = c("VD", "VS", "GE", 
+                                   "BE", "FR", "SO", "NE", "JU", 
+                                   "BS", "BL", "AG",
+                                   "ZH", 
+                                   "GL", "SH", "AR", "AI", "SG", "GR", "TG",
+                                   "LU", "UR", "SZ", "OW", "NW", "ZG",
+                                   "TI"), 
+                        grossregion = c(rep("Région lémanique", 3), 
+                                        rep("Espace Mittelland", 5), 
+                                        rep("Nordwestschweiz", 3), 
+                                        rep("Zürich", 1), 
+                                        rep("Ostschweiz", 7), 
+                                        rep("Zentralschweiz", 6), 
+                                        rep("Tessin", 1)
+                        ))
+dtv.members <- left_join(dtv.members, dtcantons, by = "canton")
+dt.tmp <- dtv.long %>% group_by(mp.uid) %>% summarize(vote.n_excused = sum(vote.result == 'Entschuldigt' | vote.result == 'Entschuldigt gem. Art. 57 Abs. 4'), 
+                                                      vote.n_not_excused = sum(vote.result == 'Hat nicht teilgenommen'),
+                                                      vote.n_notvotedpresident = sum(vote.result == 'Der Präsident stimmt nicht' | vote.result == 'Die Präsidentin/der Präsident stimmt nicht'), 
+                                                      vote.n_abstained = sum(vote.result == 'Enthaltung'), 
+                                                      vote.n = n())
+dtv.members <- left_join(dtv.members, dt.tmp, by = 'mp.uid')
+```
+
+
+# 1. Question: Two-dimensional IRT
+
+```{r, fig.width=8, fig.height=5.66}
+#run 2-dimensional IRT
+set.seed(42)
+fit3PL <- mirt(data = dtv[500,], 
+               model = 2,
+               itemtype = "3PL",
+               verbose = FALSE)
+#extract and plot scores, mark outliers through extremism score (data session, header 8.1)
+dtv.members$score1 <- fscores(fit3PL)[,1] %>% as.numeric()
+dtv.members$score2 <- fscores(fit3PL)[,2] %>% as.numeric()
+
+#drop MPs without scores (because IRT is only run on a subset of all votes)
+dtv.members=dtv.members[which(!is.na(dtv.members$score1)),]
+
+dtv.members <- dtv.members %>%
+  group_by(party.parlgroup) %>%
+  mutate(score.partycenter1 = mean(score1, na.rm = TRUE),
+         score.partycenter2 = mean(score2, na.rm = TRUE),
+         score.extreme = sqrt((score1 - score.partycenter1)^2+(score2 - score.partycenter2)^2),
+         score.average.distance = mean(score.extreme, na.rm=TRUE),
+         outlier.name=ifelse(score.extreme>3*score.average.distance,as.character(lastname),''))  %>%
+  ungroup()
+
+ggplot(dtv.members, aes(x = score1, 
+                        y = score2,
+                        label = outlier.name,
+                        color = party.parlgroup))+
+  labs(title="Figure 1: Two-dimensional IRT on Swiss MPs (51st legislature)",color="Party") +
+  xlab("Score right-wing") + ylab("Score progressive") +
+  geom_point() +
+  scale_color_manual(values = party_colors) +
+  geom_text_repel() +
+  theme(axis.title.x = element_text(vjust=-1.2),axis.title.y = element_text(vjust=+3))
+
+```
+
+Figure 1 shows that Grüne, SP, Mitte and FDP all lie relatively close to each other on the y-axis, while GLP lies a bit further up and SVP much further down. On the x-axis, FDP, SVP and Mitte lie close to each other, with GLP lying a bit and Grüne and SP much further left. Further, the different parties mostly occupy different areas on the plane. If the graph were not color coded, one could clearly distinguish GLP and SVP, as well as most MPs of Mitte and FDP. SP and Grüne on the other hand lie closer to each other, with SP MPs on average lying a bit further right and up on the plane. The parties show varying degrees of dispersion (i.e. how far spread out a party's MPs are) of their MPs. SVP MPs are dispersed the most and in both dimensions, while there is also relatively high dispersion of SP and FDP MPs along the x-axis compared to the other parties. Outliers (MPs who's distance to their party's average ideal point is at least three times larger than the average distance of their party's MPs) are labeled on the graph. Mitte has three and Grüne and FDP have one MP each (note that "Prezioso Batou" is one name) that lie much to the left of the rest of their party, while GLP has one MP that lies further down.
+The x-axis clearly reflects the traditional economic left-right spectrum. FDP, being the most fiscally conservative party, lies furthest to the right, followed by the other right-of-center parties SVP, Mitte and GLP. The left-wing SP and Grüne lie further to the left. @Hanggli2015 find a very similar alignment of Swiss parties on the economic left-right axis, the difference being that in their model, the positions of GLP and Mitte are switched. The other axis is typically marked by a cultural divide polarized by the rise of New Left and populist right parties, also present in Switzerland [@Bornschier2015], with opposing green / alternative / libertarian (GAL; hereafter referred to as progressive) and traditional / authoritarian / nationalist (TAN; hereafter referred to as conservative) values [@Hooghe2002]. However, the data doesn't fit the GAL-TAN spectrum, since , as also found found by @Hanggli2015, SP and Grüne are the most progressive, followed by GLP, then FDP, then Mitte, then SVP. A possible hypothesis is that the y-axis reflects a divide on attitudes toward European integration, which is part of the GAL-TAN spectrum [@Hooghe2002] but not the main determinant of the it in Swiss politics [@Bornschier2015]. It seems plausible to me that Grüne, SP, Mitte, FDP would have similar scores on this axis, while GLP is slightly more in favor of and SVP much more opposed to European integration.
+For simplicity, I will hereafter refer to the y-axis as the progressive-conservative spectrum and the x-axis as the left-wing-right-wing spectrum.
+
+# 2. Question: IRT with final votes
+
+```{r, fig.width=8, fig.height=5.66}
+#subset for final votes (equivalent to exercise session, header 9)
+dtv.long.finalvotes <- dtv.long %>% filter(divisionText == "Vote sur l'ensemble")
+dtv.finalvotes <- dtv.long.finalvotes %>%
+  pivot_wider(
+    id_cols = mp.uid,                     
+    names_from = voteRegistrationNumber,  
+    values_from = vote.result           
+  )
+dtv.finalvotes.members <- data.frame(dtv.finalvotes[,1])
+dtv.finalvotes <- dtv.finalvotes[,-1]
+dtv.finalvotes <- dtv.finalvotes %>%
+  mutate_all(~ case_when(
+    . == "Ja" ~ 1,
+    . == "Nein" ~ 0,
+    . == "Der Präsident stimmt nicht" ~ NA,
+    . == 'Die Präsidentin/der Präsident stimmt nicht' ~ NA,
+    . == "Entschuldigt" ~ NA,
+    . == "Entschuldigt gem. Art. 57 Abs. 4" ~ NA,
+    . == "Enthaltung" ~ NA,
+    . == "Hat nicht teilgenommen" ~ NA,
+    TRUE ~ NA_real_  # Keep everything else as NA, or modify as needed
+  ))
+dtv.finalvotes <- dtv.finalvotes %>%
+  select_if(~ n_distinct(., na.rm = TRUE) > 1)
+#add members variables and exclude same MPs that were excluded before 
+dtv.finalvotes.members = left_join(dtv.finalvotes.members,dtv.members[,c(1:9,15,16)], by = "mp.uid")
+dtv.finalvotes = dtv.finalvotes[-c(which(is.na(dtv.finalvotes.members$lastname))),]
+dtv.finalvotes.members = dtv.finalvotes.members[-c(which(is.na(dtv.finalvotes.members$lastname))),]
+```
+
+```{r, fig.width=8, fig.height=5.66}
+#run 2-dimensional IRT
+set.seed(42)
+fit3PL.final <- mirt(data = dtv.finalvotes, 
+               model = 2,
+               itemtype = "3PL",
+               verbose = FALSE)
+#extract and plot scores and label outliers
+dtv.finalvotes.members$score.final1 <- fscores(fit3PL.final)[,1] %>% as.numeric()
+dtv.finalvotes.members$score.final2 <- fscores(fit3PL.final)[,2] %>% as.numeric()
+
+dtv.finalvotes.members <- dtv.finalvotes.members %>%
+  group_by(party.parlgroup) %>%
+  mutate(score.final.partycenter1 = mean(score.final1, na.rm = TRUE),
+         score.final.partycenter2 = mean(score.final2, na.rm = TRUE),
+         score.final.extreme = sqrt((score.final1 - score.final.partycenter1)^2+(score.final2 - score.final.partycenter2)^2),
+         score.final.average.distance = mean(score.final.extreme, na.rm=TRUE))  %>%
+  ungroup()
+
+ggplot(dtv.finalvotes.members, aes(x = score.final2, 
+                        y = score.final1,
+                        color = party.parlgroup))+
+  labs(title="Figure 2: Two-dimensional IRT on Swiss MPs (final votes only)",color="Party") +
+  xlab("Score right-wing") + ylab("Score progressive") +  
+  geom_point() +
+  scale_color_manual(values = party_colors) +
+  theme(axis.title.x = element_text(vjust=-1.2),axis.title.y = element_text(vjust=+3))
+```
+We can see that for all parties, the MPs' ideal points are much more dispersed. Further, the SVP MPs have moved upwards and the GLP MPs downwards, closer to the rest of the parties. The SVP MPs have also moved more to left. Figure 3 shows that the more polar parties SVP, Grüne and SP change the most, followed by GLP, FDP and Mitte. Performing pairwise t-tests and applying Bonferroni correction (i.e. multiplying all *p*-values by 5, the number of t-tests performed), all parties' average changes are statistically significantly different from one another at the 95% level. The observation that the parties move closer together is in line with the model of Switzerland as a consensus democracy [@Linder2021]. While there are strong disagreements during the legislative process, the parliament aims to reach compromises that are supported by a broad coalition of parties in the end (in part, in order to reduce the risk of successful referendums). Thus, there will be a higher degree of consensus on final votes and since the compromises are more likely to lie in the political center, the polar parties will change the most when comparing all votes to only final votes.
+
+
+```{r}
+#calculate changes (going down or right on the graph sensationalized as positive change)
+dtv.finalvotes.members$change1 = dtv.finalvotes.members$score1-dtv.finalvotes.members$score.final1
+dtv.finalvotes.members$change2 = dtv.finalvotes.members$score.final2-dtv.finalvotes.members$score2
+dtv.finalvotes.members$changeabs = sqrt(dtv.finalvotes.members$change1^2+dtv.finalvotes.members$change2^2)
+
+ggplot(dtv.finalvotes.members, aes(x = changeabs, 
+                        y = party.parlgroup,
+                        color = party.parlgroup))+ 
+  labs(title="Figure 3: Change of MPs' ideal points from all votes to only final votes",color="Party") +
+  xlab("Absolute change") + ylab("Party") +
+  geom_point() +
+  scale_color_manual(values = party_colors) +
+  theme(axis.title.x = element_text(vjust=-1.2),axis.title.y = element_text(vjust=+3))
+
+average.changes <- dtv.finalvotes.members %>% 
+  group_by(party.parlgroup) %>% 
+  summarise(average.change = mean(changeabs, na.rm = TRUE)) %>% arrange(desc(average.change))
+ttests=c(
+t.test(dtv.finalvotes.members$changeabs[dtv.finalvotes.members$party.parlgroup=="SVP"],
+       dtv.finalvotes.members$changeabs[dtv.finalvotes.members$party.parlgroup=="Grüne"])$p.value,
+t.test(dtv.finalvotes.members$changeabs[dtv.finalvotes.members$party.parlgroup=="Grüne"],
+       dtv.finalvotes.members$changeabs[dtv.finalvotes.members$party.parlgroup=="SP"])$p.value,
+t.test(dtv.finalvotes.members$changeabs[dtv.finalvotes.members$party.parlgroup=="SP"],
+       dtv.finalvotes.members$changeabs[dtv.finalvotes.members$party.parlgroup=="GLP"])$p.value,
+t.test(dtv.finalvotes.members$changeabs[dtv.finalvotes.members$party.parlgroup=="GLP"],
+       dtv.finalvotes.members$changeabs[dtv.finalvotes.members$party.parlgroup=="FDP"])$p.value,
+t.test(dtv.finalvotes.members$changeabs[dtv.finalvotes.members$party.parlgroup=="FDP"],
+       dtv.finalvotes.members$changeabs[dtv.finalvotes.members$party.parlgroup=="Mitte"])$p.value)
+ttests=ttests*5     #bonferroni correction
+average.changes$p.value.difference=c(ttests,"")
+```
+
+# 3. Question: Other MP characteristics
+## Gender
+
+```{r, fig.width=8, fig.height=5.66}
+#gender
+ggplot(dtv.members, aes(x = score1, 
+                        y = score2,
+                        color = gender))+
+  labs(title="Figure 4: Two-dimensional IRT on Swiss MPs by gender",color="Gender",shape="Party") +
+  xlab("Score right-wing") + ylab("\nScore progressive") +
+  geom_point(aes(shape=party.parlgroup)) +
+  scale_color_manual(values = c("f"="pink","m"="blue")) +
+  scale_shape_manual(values = c(16,17,11,3,8,4)) +
+  theme(axis.title.x = element_text(vjust=-1.2),axis.title.y = element_text(vjust=+3))
+
+```
+With regard to MPs' gender and their ideal points, I posit the hypothesis that men are, within a party and on average, more conservative, more right-wing and more dispersed. An MP's dispersion is operationalized as the (euclidian) distance from their ideal point to that of their party. Examining Figure 4, it appears that men are more dispersed and more conservative but not necessarily more right-wing. To confirm, I run models regressing progressiveness score, right-wing score and dispersion on gender, controlling for party. To see whether there are differences across parties, I run the same models with an interaction of age and party. The models are displayed in Table 1. All tables throughout the exercise report standard errors in brackets and FDP is always used as the reference category for party. Male MPs are more conservative, right-wing and dispersed on average, the differences aren't significant however. The only finding with significance is that male SVP MPs are more dispersed compared to other parties.
+
+```{r}
+model.gender1 = lm(data=dtv.members, score2 ~ gender + party.parlgroup)  #men further down on average but not sig
+model.gender2 = lm(data=dtv.members, score2 ~ gender * party.parlgroup)  #men further down only in GLP and SVP, not sig
+
+model.gender3 = lm(data=dtv.members, score1 ~ gender + party.parlgroup)  
+model.gender4 = lm(data=dtv.members, score1 ~ gender * party.parlgroup)
+
+model.gender5 = lm(data=dtv.members, score.extreme ~ gender + party.parlgroup)  #men further from mean but not sig
+model.gender6 = lm(data=dtv.members, score.extreme ~ gender * party.parlgroup)  #men further except Mitte, only sig SVP
+
+
+title1 = c("Table 1: Effect of gender and party on progressiveness score, right-wing score and dispersion of MPs")
+
+gender.table = huxreg("Progressive"=model.gender1,"Progressive"=model.gender2,"Right-wing"= model.gender3,"Right-wing"=model.gender4,"Dispersion"=model.gender5,"Dispersion"=model.gender6,
+                      bold_signif = 0.05, number_format = "%.2f")[c(1:5,16:27,30),] %>%
+  set_top_border(col=c(1:7),row=nrow(huxreg(model.gender2)[c(1:5,16:27,30),])) %>%
+  set_width(1) %>%
+  set_align(row = 16, col = c(2:7), "center") %>%
+  set_align(col = c(2:3),value= "center") %>%
+  set_col_width(c(0.19,0.135,0.135,0.135,0.135,0.135,0.135)) %>%
+  set_font_size(12) %>%
+  set_bold(row=1,col=1) %>%
+  insert_row(
+        title1,
+        fill = "",
+        colspan = 7
+      ) %>%
+  set_bottom_border(row = 1, col = c(1:7))
+
+gender.table[c(3:15),1] = c("Intercept","","Male","","Male * GLP","","Male * Grüne","","Male * Mitte","","Male * SP","","Male * SVP")
+  
+gender.table
+```
+
+## Age
+
+```{r, fig.width=8, fig.height=5.66}
+#age
+dtv.members = dtv.members %>% mutate(age.cat = cut(age,c(0,40,50,60,100)))
+dtv.members = dtv.members %>% mutate(age.cat = gsub("\\(","",as.character(age.cat)))
+dtv.members = dtv.members %>% mutate(age.cat = gsub(","," to ",as.character(age.cat)))
+dtv.members = dtv.members %>% mutate(age.cat = gsub("\\]","",as.character(age.cat)))
+dtv.members = dtv.members %>% mutate(age.cat = gsub("0 to 40","under 40",as.character(age.cat)))
+dtv.members = dtv.members %>% mutate(age.cat = gsub("60 to 100","over 60",as.character(age.cat)))
+dtv.members$age.cat = factor(dtv.members$age.cat, levels = c("under 40","40 to 50","50 to 60","over 60"))
+
+ggplot(dtv.members, aes(x = score1, 
+                        y = score2,
+                        color = age.cat))+
+  labs(title="Figure 5: Two-dimensional IRT on Swiss MPs by age",color="Age",shape="Party") +
+  xlab("Score right-wing") + ylab("Score progressive") +
+  geom_point(aes(shape=party.parlgroup)) +
+  scale_shape_manual(values = c(16,17,11,3,8,4)) +
+  scale_color_viridis_d(option = "B", direction = -1) +
+  theme(axis.title.x = element_text(vjust=-1.2),axis.title.y = element_text(vjust=+3))
+
+```
+With regard to age and MPs' ideal points, there are two possible hypotheses. Like men, older MPs might be more right wing and conservative. Or they might be more centrist. Looking at Figure 5, there is no clear pattern. I run equivalent models to those on gender. Table 2 shows that age has no influence on ideal points and dispersion overall. However, older SP and Mitte MPs are more right-wing compared to other parties and younger MPs.
+
+```{r}
+model.age1 = lm(data=dtv.members, score2 ~ age + party.parlgroup)  #not sig
+model.age2 = lm(data=dtv.members, score2 ~ age * party.parlgroup)  #only GLP sig (more moderate)
+
+model.age3 = lm(data=dtv.members, score1 ~ age + party.parlgroup)  #not sig
+model.age4 = lm(data=dtv.members, score1 ~ age * party.parlgroup)  #only SP and Mitte sig (both more right)
+
+model.age5 = lm(data=dtv.members, score.extreme ~ age + party.parlgroup)  #not sig
+model.age6 = lm(data=dtv.members, score.extreme ~ age * party.parlgroup)  #not sig
+
+title2 = c("Table 2: Effect of age and party on progressiveness score, right-wing score and dispersion of MPs")
+
+age.table = huxreg("Progressive"=model.age1,"Progressive"=model.age2,"Right-wing"= model.age3,"Right-wing"=model.age4,"Dispersion"=model.age5,"Dispersion"=model.age6,
+                      bold_signif = 0.05, number_format = "%.2f")[c(1:5,16:27,30),] %>% 
+  set_top_border(col=c(1:7),row=nrow(huxreg(model.age2)[c(1:5,16:27,30),])) %>%
+  set_width(1) %>%
+  set_align(row = 16, col = c(2:7), "center") %>%
+  set_align(col = c(2:3),value= "center") %>%
+  set_col_width(c(0.19,0.135,0.135,0.135,0.135,0.135,0.135)) %>%
+  set_font_size(12) %>%
+  set_bold(row=1,col=1) %>%
+  insert_row(
+        title2,
+        fill = "",
+        colspan = 7
+      ) %>%
+  set_bottom_border(row = 1, col = c(1:7))
+
+age.table[c(3:15),1] = c("Intercept","","Age","","Age * GLP","","Age * Grüne","","Age * Mitte","","Age * SP","","Age * SVP")
+  
+age.table
+```
+
+
+## Bill Sponsorship
+
+```{r, fig.width=8, fig.height=5.66}
+#bill sponsorship
+dtv.members$nrbills <- dtv.long$mp.nrbills[match(dtv.members$mp.uid, dtv.long$mp.uid)]
+dtv.members = dtv.members %>% mutate(nrbills.cat = cut(nrbills,c(0,19,39,59,200)))
+dtv.members = dtv.members %>% mutate(nrbills.cat = gsub("\\(0,19\\]","Under 20",as.character(nrbills.cat)))
+dtv.members = dtv.members %>% mutate(nrbills.cat = gsub("\\(19,39\\]","20 to 39",as.character(nrbills.cat)))
+dtv.members = dtv.members %>% mutate(nrbills.cat = gsub("\\(39,59\\]","40 to 59",as.character(nrbills.cat)))
+dtv.members = dtv.members %>% mutate(nrbills.cat = gsub("\\(59,200\\]","Over 59",as.character(nrbills.cat)))
+dtv.members$nrbills.cat = factor(dtv.members$nrbills.cat, levels = c("Under 20","20 to 39","40 to 59","Over 59"))
+
+ggplot(dtv.members, aes(x = score1, 
+                        y = score2,
+                        color = nrbills.cat))+
+  labs(title="Figure 6: Two-dimensional IRT on Swiss MPs by number of bills sponsored",color="Nr. of bills sponsored",shape="Party") +
+  xlab("Score right-wing") + ylab("Score progressive") +
+  geom_point(aes(shape=party.parlgroup)) +
+  scale_shape_manual(values = c(16,17,11,3,8,4)) +
+  scale_color_viridis_d(option = "B", direction = -1) +
+  theme(axis.title.x = element_text(vjust=-1.2),axis.title.y = element_text(vjust=+3))
+
+```
+Figure 6 shows how many bills individual MPs have sponsored. Only bills that have been voted on in the 51st legislature are considered. It appears that SP and Grüne have a high share of MPs with a high number of bills (despite also having higher shares of MPs that have only entered Parliament in the 51st legislature). This might be caused by MPs feeling more pressure to sponsor bills after entering parliament in order to show that they are hard working (and to signal what topics are important to them). However, since the legislative process in Switzerland takes a long time [@Linder2017], there are also older bills that are voted on in the 51st legislature. With regard to ideal points, MPs that have sponsored a large amount of bills might be more moderate (they implicitly trade votes with MPs of other parties for their own bills) or more extreme (they wanna signal their opposition to the political center which is more successful in passing legislation). Table 3 presents once again the same models. MPs that have sponsored more bills are significantly more left-wing compared to other MPs of their party. The effect is substantively very small, however. MPs only move 4 points to the left per 10 bills sponsored. There are no significant results across parties.
+
+```{r}
+model.nrbills1 = lm(data=dtv.members, score2 ~ nrbills + party.parlgroup)  #not sig
+model.nrbills2 = lm(data=dtv.members, score2 ~ nrbills * party.parlgroup)  #not sig
+
+model.nrbills3 = lm(data=dtv.members, score1 ~ nrbills + party.parlgroup)  #more left
+model.nrbills4 = lm(data=dtv.members, score1 ~ nrbills * party.parlgroup)  #not sig anymore
+
+model.nrbills5 = lm(data=dtv.members, score.extreme ~ nrbills + party.parlgroup)  #not sig
+model.nrbills6 = lm(data=dtv.members, score.extreme ~ nrbills * party.parlgroup)  #not sig
+
+
+title3 = c("Table 3: Effect of number of sponsored bills and party on progressiveness score, right-wing score and dispersion of MPs")
+
+nrbills.table = huxreg("Progressive"=model.nrbills1,"Progressive"=model.nrbills2,"Right-wing"= model.nrbills3,"Right-wing"=model.nrbills4,"Dispersion"=model.nrbills5,"Dispersion"=model.nrbills6,
+                      bold_signif = 0.05, number_format = "%.3f")[c(1:5,16:27,30),] %>% 
+  set_top_border(col=c(1:7),row=nrow(huxreg(model.nrbills2)[c(1:5,16:27,30),])) %>%
+  set_width(1) %>%
+  set_align(row = 16, col = c(2:7), "center") %>%
+  set_align(col = c(2:3),value= "center") %>%
+  set_col_width(c(0.19,0.135,0.135,0.135,0.135,0.135,0.135)) %>%
+  set_font_size(12) %>%
+  set_bold(row=1,col=1) %>%
+  insert_row(
+        title3,
+        fill = "",
+        colspan = 7
+      ) %>%
+  set_bottom_border(row = 1, col = c(1:7))
+
+nrbills.table[c(3:15),1] = c("Intercept","","Bills","","Bills * GLP","","Bills * Grüne","","Bills * Mitte","","Bills * SP","","Bills * SVP")
+  
+nrbills.table
+
+```
+
+
+## Seniority
+
+```{r, fig.width=8, fig.height=5.66}
+#seniority
+dtv.members = dtv.members %>% mutate(seniority = cut(years.of.service,c(0,4.1,8.1,100)))
+dtv.members = dtv.members %>% mutate(seniority = gsub("\\(0,4.1\\]","51st Legislature",as.character(seniority)))
+dtv.members = dtv.members %>% mutate(seniority = gsub("\\(4.1,8.1\\]","Previous Legislature",as.character(seniority)))
+dtv.members = dtv.members %>% mutate(seniority = gsub("\\(8.1,100\\]","Earlier",as.character(seniority)))
+dtv.members$seniority = factor(dtv.members$seniority, levels = c("51st Legislature","Previous Legislature","Earlier"))
+
+ggplot(dtv.members, aes(x = score1, 
+                        y = score2,
+                        color = seniority))+
+  labs(title="Figure 7: Two-dimensional IRT on Swiss MPs by seniority",color="Entered Parliament",shape="Party") +
+  xlab("Score right-wing") + ylab("Score progressive") +
+  geom_point(aes(shape=party.parlgroup)) +
+  scale_shape_manual(values = c(16,17,11,3,8,4)) +
+  scale_color_viridis_d(option = "B", direction = -1) +
+  theme(axis.title.x = element_text(vjust=-1.2),axis.title.y = element_text(vjust=+3))
+
+```
+
+With regard to seniority, I expect more senior MPs to be more moderate due to having more experience in having worked with MPs of other parties. With regard to dispersion, they might be more dispersed because they feel less pressure to conform with their party or they might be less dispersed because they have more influence over the party's position (i.e. they have the power to move the party's ideal point towards their own). I once again run the same models, operationalizing seniority as whether the MP first entered parliament in the 51st legislature, the previous legislature or earlier. Having entered in the 51st legislature forms the baseline category. Table 4 shows that more senior MPs are more dispersed but the difference is only significant for MPs that entered in the previous legislature, not for MPs that entered earlier (i.e. the most senior MPs). With regard to differences across parties, the most senior MPs are more dispersed in SP and SVP compared to other parties. 
+
+```{r}
+model.seniority1 = lm(data=dtv.members, score2 ~ seniority + party.parlgroup)
+model.seniority2 = lm(data=dtv.members, score2 ~ seniority * party.parlgroup)
+
+model.seniority3 = lm(data=dtv.members, score1 ~ seniority + party.parlgroup)
+model.seniority4 = lm(data=dtv.members, score1 ~ seniority * party.parlgroup)
+
+model.seniority5 = lm(data=dtv.members, score.extreme ~ seniority + party.parlgroup)  #only Previous leg. (4-8y) sig
+model.seniority6 = lm(data=dtv.members, score.extreme ~ seniority * party.parlgroup)  #only Previous leg. for GLP & Mitte
+
+title4 = c("Table 4: Effect of seniority and party on progressiveness score, right-wing score and dispersion of MPs")
+
+seniority.table = huxreg("Progressive"=model.seniority1,"Progressive"=model.seniority2,"Right-wing"= model.seniority3,"Right-wing"=model.seniority4,"Dispersion"=model.seniority5,"Dispersion"=model.seniority6,
+                      bold_signif = 0.05, number_format = "%.2f")[c(1:7,18:39,42),] %>% 
+  set_top_border(col=c(1:7),row=nrow(huxreg(model.seniority2)[c(1:7,18:39,42),])) %>%
+  set_width(1) %>%
+  set_align(row = 16, col = c(2:7), "center") %>%
+  set_align(col = c(2:3),value= "center") %>%
+  set_col_width(c(0.19,0.135,0.135,0.135,0.135,0.135,0.135)) %>%
+  set_font_size(12) %>%
+  set_bold(row=1,col=1) %>%
+  insert_row(
+        title4,
+        fill = "",
+        colspan = 7
+      ) %>%
+  set_bottom_border(row = 1, col = c(1:7)) %>%
+  set_align(row = c(29), col = c(4:7), value = "center")
+
+seniority.table[c(3:27),1] = c("Intercept","","Previous","","Earlier","","Previous * GLP","","Earlier * GLP","","Previous * Grüne","","Earlier * Grüne","","Previous * Mitte","","Earlier * Mitte","","Previous * SP","","Earlier * SP","","Previous * SVP","","Earlier * SVP")
+  
+seniority.table
+```
+
+
+# 4. Question: Policy Domains
+
+```{r, fig.width=8, fig.height=5.66}
+#clusters 
+
+graph_clusters_optimum = fviz_nbclust(dtv.finalvotes.members[,15:16],FUNcluster = kmeans) #yields optimum of six or three clusters, choose three because six is almost identical to party affiliation, I wanna generalize a little
+km = kmeans(dtv.members[,15:16],3,nstart=50)
+dtv.members$Cluster = as.character(km$cluster)
+#Adjust clusters to keep the three Mitte outliers together
+dtv.members$Cluster[which(dtv.members$mp.uid == 4294)]=dtv.members$Cluster[which(dtv.members$mp.uid == 4036)]
+#Rename clusters
+dtv.members = dtv.members %>% mutate(Cluster=gsub(Cluster[match("SVP",party.parlgroup)],"SVP",as.character(Cluster)))
+dtv.members = dtv.members %>% mutate(Cluster=gsub(Cluster[match("SP",party.parlgroup)],"left",as.character(Cluster)))
+dtv.members = dtv.members %>% mutate(Cluster=gsub(Cluster[match("FDP",party.parlgroup)],"right",as.character(Cluster)))
+
+
+ggplot(dtv.members, aes(x = score1, 
+                                   y = score2,
+                                   color = party.parlgroup))+
+    labs(title="Figure 8: Clustered Two-dimensional IRT on Swiss MPs",color="Party") +
+    xlab("Score right-wing") + ylab("Score progressive") +
+    geom_point() +
+    scale_color_manual(values = party_colors) +
+    geom_mark_hull(inherit.aes=FALSE,aes(x = score1, 
+                                         y = score2,
+                                         fill=Cluster),
+                   concavity=5,
+                   expand = unit(2.5, "mm"),show.legend=FALSE) +
+  theme(axis.title.x = element_text(vjust=-1.2),axis.title.y = element_text(vjust=+3))
+```
+
+I cluster the MPs using kmeans. ASW yields an optimal number of six clusters or (slightly less optimally) three clusters. Since the 6-clustering is almost identical to the six party "clusters", I choose the 3-clustering, shown in Figure 8. There is a left cluster of SP, Grüne and the three outlier Mitte MPs, a right cluster of GLP, Mitte and FDP, and a separate cluster of SVP. Figure 9 shows for each policy domain, what share of bills has been sponsored by the left, right and SVP cluster. Only bills that have been voted on in the 51st legislature and only policy domains with at least six bills are included. Across all these bills, the share of sponsored bills is 38% for the left cluster, 37% for the right cluster and 25% for the SVP cluster. The left cluster is most "overrepresented" in the environmental domain (67% of all bills), which isn't surprising, followed by migration, the economy and agriculture (44% of all bills each), all of which are policy domains which aren't typically attributed to the left. The right cluster sponsors a disproportionate amount of bills on international affairs (57% of all bills), which is a policy domain that typically wouldn't necessarily be attributed to any party or cluster, followed by health and the financial sector (52% and 50% of all bills), the latter of which being a hallmark topic for the right. Finally, SVP sponsors more bills on migration (56%), which is again not surprising, followed by energy and public finances (43% and 38%). Additional surprising findings are that SVP isn't overrepresented in the agricultural domain (25% of all bills) and that the left and right cluster sponsor the same share of bills in the civil rights domain (each 41& of all bills), which would typically be attributed to the left.
+A survey asking voters what political topics are important to them (and which party they vote for) would help create a link to assessing substantive representation. One would be able to assess whether a party's MPs actually focus on the topics that are important to their voters.
+
+```{r}
+#Get all bills sponsored by current MPs with topic
+dtv.sponsor = dtv.long[which((!duplicated(dtv.long$bill.sponsor)) & (dtv.long$bill.sponsor %in% dtv.members$mp.uid)),]
+dtv.sponsor = dtv.sponsor[,c(13,26,28)]
+dtv.sponsor$Cluster <- dtv.members$Cluster[match(dtv.sponsor$bill.sponsor, dtv.members$mp.uid)]
+
+bills.topics=sort(table(dtv.sponsor$bill.policydomain)/nrow(dtv.sponsor)*100,decreasing=TRUE)
+
+#Drop topics with fewer than 6 bills
+dtv.sponsor = dtv.sponsor[-which(dtv.sponsor$bill.policydomain %in% c("Criminal Law","Culture, Religion, Sports","Education, Research","Government Operations","Labor","Parliamentary Procedure","Social Welfare","Spatial Planing","Technology, Communication")),]
+
+cluster_colors <- c("left" = "#F0554D", "SVP" = "#4B8A3E", "right" = "#3872B5")
+
+dtv.sponsor %>%
+  count(bill.policydomain,Cluster) %>%
+  group_by(bill.policydomain) %>%
+  mutate(pct= prop.table(n) * 100) %>%
+ggplot(dtv.sponsor, mapping=aes(bill.policydomain, pct, fill = Cluster)) +
+  geom_bar(stat='identity') +
+  labs(title = "Figure 9: Distribution of sponsored bills on different policy domains by MP clusters") +
+  xlab("Policy domain") + ylab("Share of sponsored bills by cluster") +
+  theme(axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  scale_fill_manual(values = cluster_colors) +
+  geom_text(aes(label=paste0(sprintf("%1.0f", pct),"%")),
+            position=position_stack(vjust=0.5)) +
+  coord_flip() +
+  theme(axis.title.x = element_text(vjust=-1.2), plot.title = element_text(hjust=0.72))
+
+#Overall: 25% SVP, 37% right, 38% left
+```
+
+
+# References {.unnumbered}
+
+::: {#refs}
+:::
